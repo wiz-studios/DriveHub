@@ -1,0 +1,109 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Users collection: users can read/write only their own data
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && request.resource.data.role == 'user';
+      allow update: if isOwner(userId) && 
+                       (!('role' in request.resource.data) || request.resource.data.role == resource.data.role);
+      allow delete: if false; // Users cannot be deleted
+    }
+
+    // Vehicles collection: public read, admin-only write
+    match /vehicles/{vehicleId} {
+      allow read: if isAuthenticated();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Bookings collection: users read/write their own, admins read all
+    match /bookings/{bookingId} {
+      allow read: if isAdmin() || 
+                     (isAuthenticated() && document.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid &&
+                       request.resource.data.status == 'pending' &&
+                       'vehicleId' in request.resource.data &&
+                       'startDate' in request.resource.data &&
+                       'endDate' in request.resource.data &&
+                       request.resource.data.endDate > request.resource.data.startDate;
+      allow update: if isAdmin() || 
+                       (isAuthenticated() && document.data.userId == request.auth.uid &&
+                        request.resource.data.userId == resource.data.userId);
+      allow delete: if isAdmin() || 
+                       (isAuthenticated() && document.data.userId == request.auth.uid && 
+                        document.data.status == 'cancelled');
+    }
+
+    // Rentals collection: track active rentals
+    match /rentals/{rentalId} {
+      allow read: if isAdmin() || 
+                     (isAuthenticated() && document.data.userId == request.auth.uid);
+      allow create: if isAdmin() && 
+                       'bookingId' in request.resource.data &&
+                       'vehicleId' in request.resource.data &&
+                       'userId' in request.resource.data &&
+                       'startDate' in request.resource.data;
+      allow update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // Payments collection: users read/write their own, admins read all
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || 
+                     (isAuthenticated() && document.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid &&
+                       request.resource.data.status == 'pending' &&
+                       'bookingId' in request.resource.data &&
+                       request.resource.data.amount > 0;
+      allow update: if isAdmin() && 
+                       'status' in request.resource.data &&
+                       request.resource.data.status in ['completed', 'failed', 'refunded'];
+      allow delete: if false;
+    }
+
+    // Reviews collection: users post reviews of their rentals
+    match /reviews/{reviewId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid &&
+                       'vehicleId' in request.resource.data &&
+                       'rating' in request.resource.data &&
+                       request.resource.data.rating >= 1 &&
+                       request.resource.data.rating <= 5;
+      allow update, delete: if isAuthenticated() && 
+                               document.data.userId == request.auth.uid;
+    }
+
+    // GPS Tracking: admin-write, user-read their own vehicle's location
+    match /gpsTracking/{vehicleId} {
+      allow read: if isAdmin() || 
+                     (isAuthenticated() && 
+                      exists(/databases/$(database)/documents/rentals/{rentalId}) &&
+                      get(/databases/$(database)/documents/rentals/{rentalId}).data.vehicleId == vehicleId &&
+                      get(/databases/$(database)/documents/rentals/{rentalId}).data.userId == request.auth.uid);
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    // Deny all by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

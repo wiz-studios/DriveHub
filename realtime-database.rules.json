@@ -1,0 +1,41 @@
+{
+  "rules": {
+    "gpsLocations": {
+      ".read": "auth != null",
+      ".write": false,
+      "$vehicleId": {
+        ".read": "root.child('gpsLocations').child($vehicleId).child('userId').val() == auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'",
+        ".write": "root.child('users').child(auth.uid).child('role').val() === 'admin'",
+        "lat": {
+          ".validate": "isNumber() && this.val() >= -90 && this.val() <= 90"
+        },
+        "lng": {
+          ".validate": "isNumber() && this.val() >= -180 && this.val() <= 180"
+        },
+        "speed": {
+          ".validate": "isNumber() && this.val() >= 0"
+        },
+        "heading": {
+          ".validate": "isNumber() && this.val() >= 0 && this.val() < 360"
+        },
+        "accuracy": {
+          ".validate": "isNumber() && this.val() >= 0"
+        },
+        "updatedAt": {
+          ".validate": "isNumber()"
+        }
+      }
+    },
+    "users": {
+      ".read": "auth != null",
+      ".write": false,
+      "$uid": {
+        ".read": "$uid === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'",
+        ".write": "$uid === auth.uid || root.child('users').child(auth.uid).child('role').val() === 'admin'",
+        "role": {
+          ".write": "root.child('users').child(auth.uid).child('role').val() === 'admin'"
+        }
+      }
+    }
+  }
+}
