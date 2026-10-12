@@ -8,23 +8,37 @@ service cloud.firestore {
 
     function isAdmin() {
       return isAuthenticated() && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'admin';
     }
 
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
-    // Users collection: users can read/write only their own data
+    function ownsBooking(bookingId) {
+      return isAuthenticated() && bookingId is string &&
+             get(/databases/$(database)/documents/bookings/$(bookingId)).data.userId == request.auth.uid;
+    }
+
+    function canReadVehicleLocation(vehicleId) {
+      let rentalId = resource.data.get('rentalId', '');
+      let rental = get(/databases/$(database)/documents/rentals/$(rentalId)).data;
+      return rentalId is string && rentalId != '' &&
+             rental.vehicleId == vehicleId &&
+             rental.userId == request.auth.uid &&
+             rental.status == 'active';
+    }
+
+    // Users cannot add, change, or remove their authorization role.
     match /users/{userId} {
       allow read: if isOwner(userId) || isAdmin();
       allow create: if isOwner(userId) && request.resource.data.role == 'user';
       allow update: if isOwner(userId) && 
-                       (!('role' in request.resource.data) || request.resource.data.role == resource.data.role);
+                       !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']);
       allow delete: if false; // Users cannot be deleted
     }
 
-    // Vehicles collection: public read, admin-only write
+    // Vehicles collection: authenticated read, admin-only write
     match /vehicles/{vehicleId} {
       allow read: if isAuthenticated();
       allow create, update, delete: if isAdmin();
@@ -33,47 +47,102 @@ service cloud.firestore {
     // Bookings collection: users read/write their own, admins read all
     match /bookings/{bookingId} {
       allow read: if isAdmin() || 
-                     (isAuthenticated() && document.data.userId == request.auth.uid);
+                     isOwner(resource.data.userId);
       allow create: if isAuthenticated() && 
                        request.resource.data.userId == request.auth.uid &&
                        request.resource.data.status == 'pending' &&
+                       request.resource.data.paymentStatus == 'unpaid' &&
+                       request.resource.data.keys().hasOnly([
+                         'id', 'userId', 'vehicleId', 'startDate', 'endDate',
+                         'pickupLocation', 'dropoffLocation', 'totalPrice',
+                         'status', 'paymentStatus', 'createdAt', 'notes', 'updatedAt'
+                       ]) &&
                        'vehicleId' in request.resource.data &&
+                       request.resource.data.vehicleId is string &&
+                       request.resource.data.totalPrice is number &&
+                       request.resource.data.totalPrice > 0 &&
                        'startDate' in request.resource.data &&
                        'endDate' in request.resource.data &&
+                       ((request.resource.data.startDate is string &&
+                         request.resource.data.endDate is string) ||
+                        (request.resource.data.startDate is timestamp &&
+                         request.resource.data.endDate is timestamp)) &&
                        request.resource.data.endDate > request.resource.data.startDate;
       allow update: if isAdmin() || 
-                       (isAuthenticated() && document.data.userId == request.auth.uid &&
-                        request.resource.data.userId == resource.data.userId);
+                       (isOwner(resource.data.userId) &&
+                        request.resource.data.diff(resource.data).affectedKeys()
+                          .hasOnly(['status', 'notes', 'updatedAt']) &&
+                        (request.resource.data.status == resource.data.status ||
+                         (resource.data.status in ['pending', 'confirmed'] &&
+                          request.resource.data.status == 'cancelled')));
       allow delete: if isAdmin() || 
-                       (isAuthenticated() && document.data.userId == request.auth.uid && 
-                        document.data.status == 'cancelled');
+                       (isOwner(resource.data.userId) &&
+                        resource.data.status == 'cancelled');
     }
 
     // Rentals collection: track active rentals
     match /rentals/{rentalId} {
       allow read: if isAdmin() || 
-                     (isAuthenticated() && document.data.userId == request.auth.uid);
+                     isOwner(resource.data.userId);
       allow create: if isAdmin() && 
                        'bookingId' in request.resource.data &&
                        'vehicleId' in request.resource.data &&
                        'userId' in request.resource.data &&
-                       'startDate' in request.resource.data;
-      allow update: if isAdmin();
+                       request.resource.data.status == 'initiated';
+      // Preserve the client's pickup, return, GPS-distance, and dispute operations
+      // without allowing changes to ownership, pricing, or inspection approval.
+      allow update: if isAdmin() || (isOwner(resource.data.userId) && (
+        (resource.data.status == 'initiated' &&
+         request.resource.data.status == 'active' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'startedAt', 'pickupPhotos', 'updatedAt']) &&
+         request.resource.data.pickupPhotos is list) ||
+        (resource.data.status == 'active' &&
+         request.resource.data.status == 'returned' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'returnedAt', 'returnOdometer', 'returnPhotos',
+                     'calculatedDistance', 'gpsDistance', 'updatedAt']) &&
+         request.resource.data.returnOdometer is number &&
+         request.resource.data.returnOdometer >= resource.data.pickupOdometer &&
+         request.resource.data.calculatedDistance ==
+           request.resource.data.returnOdometer - resource.data.pickupOdometer &&
+         request.resource.data.returnPhotos is list &&
+         request.resource.data.gpsDistance is number &&
+         request.resource.data.gpsDistance >= 0) ||
+        (resource.data.status == 'active' &&
+         request.resource.data.status == resource.data.status &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['gpsDistance', 'updatedAt']) &&
+         request.resource.data.gpsDistance is number &&
+         request.resource.data.gpsDistance >= 0) ||
+        (resource.data.status in ['returned', 'inspecting', 'closed'] &&
+         request.resource.data.status == 'disputed' &&
+         request.resource.data.diff(resource.data).affectedKeys()
+           .hasOnly(['status', 'updatedAt']))
+      ));
       allow delete: if false;
     }
 
     // Payments collection: users read/write their own, admins read all
     match /payments/{paymentId} {
       allow read: if isAdmin() || 
-                     (isAuthenticated() && document.data.userId == request.auth.uid);
+                     isOwner(resource.data.userId);
       allow create: if isAuthenticated() && 
                        request.resource.data.userId == request.auth.uid &&
                        request.resource.data.status == 'pending' &&
-                       'bookingId' in request.resource.data &&
+                       request.resource.data.keys().hasOnly([
+                         'id', 'userId', 'bookingId', 'amount', 'status',
+                         'stripePaymentIntentId', 'createdAt'
+                       ]) &&
+                       ownsBooking(request.resource.data.bookingId) &&
+                       get(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.status == 'pending' &&
+                       request.resource.data.amount ==
+                         get(/databases/$(database)/documents/bookings/$(request.resource.data.bookingId)).data.totalPrice &&
+                       request.resource.data.amount is number &&
                        request.resource.data.amount > 0;
       allow update: if isAdmin() && 
                        'status' in request.resource.data &&
-                       request.resource.data.status in ['completed', 'failed', 'refunded'];
+                       request.resource.data.status in ['succeeded', 'completed', 'failed', 'refunded'];
       allow delete: if false;
     }
 
@@ -86,18 +155,22 @@ service cloud.firestore {
                        'rating' in request.resource.data &&
                        request.resource.data.rating >= 1 &&
                        request.resource.data.rating <= 5;
-      allow update, delete: if isAuthenticated() && 
-                               document.data.userId == request.auth.uid;
+      allow update: if isOwner(resource.data.userId) &&
+                       request.resource.data.diff(resource.data).affectedKeys()
+                         .hasOnly(['rating', 'comment', 'updatedAt']) &&
+                       request.resource.data.rating >= 1 &&
+                       request.resource.data.rating <= 5;
+      allow delete: if isOwner(resource.data.userId);
     }
 
     // GPS Tracking: admin-write, user-read their own vehicle's location
     match /gpsTracking/{vehicleId} {
       allow read: if isAdmin() || 
-                     (isAuthenticated() && 
-                      exists(/databases/$(database)/documents/rentals/{rentalId}) &&
-                      get(/databases/$(database)/documents/rentals/{rentalId}).data.vehicleId == vehicleId &&
-                      get(/databases/$(database)/documents/rentals/{rentalId}).data.userId == request.auth.uid);
-      allow create, update: if isAdmin();
+                     (isAuthenticated() && canReadVehicleLocation(vehicleId));
+      // A trusted writer must attach the rental ID to each vehicle-location document.
+      allow create, update: if isAdmin() &&
+                               request.resource.data.rentalId is string &&
+                               get(/databases/$(database)/documents/rentals/$(request.resource.data.rentalId)).data.vehicleId == vehicleId;
       allow delete: if false;
     }
 
@@ -107,3 +180,4 @@ service cloud.firestore {
     }
   }
 }
+
