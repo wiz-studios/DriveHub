@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useAuth } from '@/lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2, Calendar, MapPin, DollarSign } from 'lucide-react';
@@ -10,6 +10,18 @@ import { secureCreateBooking, ValidationError, AuthorizationError } from '@/lib/
 import toast from 'react-hot-toast';
 
 export default function NewBookingPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center">
+        <Loader2 className="animate-spin text-blue-600" size={40} />
+      </div>
+    }>
+      <NewBookingForm />
+    </Suspense>
+  );
+}
+
+function NewBookingForm() {
   const { user, loading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
